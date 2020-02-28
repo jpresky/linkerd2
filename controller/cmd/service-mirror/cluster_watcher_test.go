@@ -3,224 +3,19 @@ package servicemirror
 import (
 	"fmt"
 	"reflect"
-	"strings"
 	"testing"
 
-	"github.com/ghodss/yaml"
 	"github.com/linkerd/linkerd2/controller/k8s"
-	consts "github.com/linkerd/linkerd2/pkg/k8s"
 	logging "github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/workqueue"
 )
 
-const clusterName = "remote"
-const clusterDomain = "cluster.local"
-
-func diffServices(expected, actual *corev1.Service) error {
-	if expected.Name != actual.Name {
-		return fmt.Errorf("was expecting service with name %s but was %s", expected.Name, actual.Name)
-	}
-
-	if expected.Namespace != actual.Namespace {
-		return fmt.Errorf("was expecting service with namespace %s but was %s", expected.Namespace, actual.Namespace)
-	}
-
-	if !reflect.DeepEqual(expected.Annotations, actual.Annotations) {
-		return fmt.Errorf("was expecting service with annotations %v but got %v", expected.Annotations, actual.Annotations)
-	}
-
-	if !reflect.DeepEqual(expected.Labels, actual.Labels) {
-		return fmt.Errorf("was expecting service with labels %v but got %v", expected.Labels, actual.Labels)
-	}
-
-	return nil
-}
-
-func diffEndpoints(expected, actual *corev1.Endpoints) error {
-	if expected.Name != actual.Name {
-		return fmt.Errorf("was expecting endpoints with name %s but was %s", expected.Name, actual.Name)
-	}
-
-	if expected.Namespace != actual.Namespace {
-		return fmt.Errorf("was expecting endpoints with namespace %s but was %s", expected.Namespace, actual.Namespace)
-	}
-
-	if !reflect.DeepEqual(expected.Annotations, actual.Annotations) {
-		return fmt.Errorf("was expecting endpoints with annotations %v but got %v", expected.Annotations, actual.Annotations)
-	}
-
-	if !reflect.DeepEqual(expected.Labels, actual.Labels) {
-		return fmt.Errorf("was expecting endpoints with labels %v but got %v", expected.Labels, actual.Labels)
-	}
-
-	if !reflect.DeepEqual(expected.Subsets, actual.Subsets) {
-		return fmt.Errorf("was expecting endpoints with subsets %v but got %v", expected.Subsets, actual.Subsets)
-	}
-
-	return nil
-}
-
-func getRemoteService(name, namespace, gtwName, gtwNs, resourceVersion string, ports []corev1.ServicePort) *corev1.Service {
-	annotations := make(map[string]string)
-	if gtwName != "" && gtwNs != "" {
-		annotations[consts.GatewayNameAnnotation] = gtwName
-		annotations[consts.GatewayNsAnnotation] = gtwNs
-	}
-
-	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Service",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            name,
-			Namespace:       namespace,
-			ResourceVersion: resourceVersion,
-			Annotations:     annotations,
-		},
-		Spec: corev1.ServiceSpec{
-			Ports: ports,
-		},
-		Status: corev1.ServiceStatus{},
-	}
-}
-
-func getRemoteServiceAsYaml(name, namespace, gtwName, gtwNs, resourceVersion string, ports []corev1.ServicePort, t *testing.T) string {
-	svc := getRemoteService(name, namespace, gtwName, gtwNs, resourceVersion, ports)
-
-	bytes, err := yaml.Marshal(svc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return fmt.Sprintf("%s", bytes)
-}
-
-func getMirroredService(name, namespace, gtwName, gtwNs, resourceVersion, gatewayResourceVersion string, ports []corev1.ServicePort) *corev1.Service {
-	annotations := make(map[string]string)
-	annotations[consts.RemoteResourceVersionAnnotation] = resourceVersion
-	annotations[consts.RemoteServiceFqName] = fmt.Sprintf("%s.%s.svc.cluster.local", strings.Replace(name, "-remote", "", 1), namespace)
-
-	if gatewayResourceVersion != "" {
-		annotations[consts.RemoteGatewayResourceVersionAnnotation] = gatewayResourceVersion
-
-	}
-	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Service",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels: map[string]string{
-				consts.RemoteClusterNameLabel: "remote",
-				consts.MirroredResourceLabel:  "true",
-				consts.RemoteGatewayNameLabel: gtwName,
-				consts.RemoteGatewayNsLabel:   gtwNs,
-			},
-			Annotations: annotations,
-		},
-		Spec: corev1.ServiceSpec{
-			Ports: ports,
-		},
-		Status: corev1.ServiceStatus{},
-	}
-}
-
-func getMirroredServiceAsYaml(name, namespace, gtwName, gtwNs, resourceVersion, gatewayResourceVersion string, ports []corev1.ServicePort, t *testing.T) string {
-	svc := getMirroredService(name, namespace, gtwName, gtwNs, resourceVersion, gatewayResourceVersion, ports)
-
-	bytes, err := yaml.Marshal(svc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return fmt.Sprintf("%s", bytes)
-}
-
-func getGateway(name, namespace, resourceVersion, ip, portName string, port int32) *corev1.Service {
-	svc := corev1.Service{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Service",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            name,
-			Namespace:       namespace,
-			ResourceVersion: resourceVersion,
-		},
-		Spec: corev1.ServiceSpec{
-			Ports: []corev1.ServicePort{
-				{
-					Name:     portName,
-					Protocol: "TCP",
-					Port:     port,
-				},
-			},
-		},
-		Status: corev1.ServiceStatus{},
-	}
-
-	if ip != "" {
-		svc.Status.LoadBalancer.Ingress = append(svc.Status.LoadBalancer.Ingress, corev1.LoadBalancerIngress{IP: ip})
-	}
-	return &svc
-}
-
-func getGatewayAsYaml(name, namespace, resourceVersion, ip, portName string, port int32, t *testing.T) string {
-	gtw := getGateway(name, namespace, resourceVersion, ip, portName, port)
-
-	bytes, err := yaml.Marshal(gtw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return fmt.Sprintf("%s", bytes)
-}
-
-func getEndpoints(name, namespace, gtwName, gtwNs, gatewayIP string, ports []corev1.EndpointPort) *corev1.Endpoints {
-	var subsets []corev1.EndpointSubset
-	if gatewayIP != "" {
-		subsets = []corev1.EndpointSubset{
-			{
-				Addresses: []corev1.EndpointAddress{
-					{
-						IP: gatewayIP,
-					},
-				},
-				Ports: ports,
-			},
-		}
-	}
-
-	return &corev1.Endpoints{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Endpoints",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels: map[string]string{
-				consts.RemoteClusterNameLabel: "remote",
-				consts.MirroredResourceLabel:  "true",
-				consts.RemoteGatewayNameLabel: gtwName,
-				consts.RemoteGatewayNsLabel:   gtwNs,
-			},
-		},
-		Subsets: subsets,
-	}
-}
-
-func getEndpointsAsYaml(name, namespace, gtwName, gtwNs, gatewayIP string, ports []corev1.EndpointPort, t *testing.T) string {
-	ep := getEndpoints(name, namespace, gtwName, gtwNs, gatewayIP, ports)
-
-	bytes, err := yaml.Marshal(ep)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return fmt.Sprintf("%s", bytes)
-}
+const (
+	clusterName   = "remote"
+	clusterDomain = "cluster.local"
+)
 
 type testCase struct {
 	testDescription        string
@@ -315,7 +110,7 @@ func TestRemoteServiceCreated(t *testing.T) {
 			testDescription: "create service and endpoints when gateway cannot be resolved",
 			events: []interface{}{
 				&RemoteServiceCreated{
-					service: getRemoteService("service-one", "ns1", "missing-gateway", "missing-namespace", "111", nil),
+					service: remoteService("service-one", "ns1", "missing-gateway", "missing-namespace", "111", nil),
 					gatewayData: &gatewayMetadata{
 						Name:      "missing-gateway",
 						Namespace: "missing-namespace",
@@ -323,17 +118,17 @@ func TestRemoteServiceCreated(t *testing.T) {
 				},
 			},
 			expectedLocalServices: []*corev1.Service{
-				getMirroredService("service-one-remote", "ns1", "missing-gateway", "missing-namespace", "111", "", nil),
+				mirroredService("service-one-remote", "ns1", "missing-gateway", "missing-namespace", "111", "", nil),
 			},
 			expectedLocalEndpoints: []*corev1.Endpoints{
-				getEndpoints("service-one-remote", "ns1", "missing-gateway", "missing-namespace", "", nil),
+				endpoints("service-one-remote", "ns1", "missing-gateway", "missing-namespace", "", nil),
 			},
 		},
 		{
 			testDescription: "create service and endpoints without subsets when gateway spec is wrong",
 			events: []interface{}{
 				&RemoteServiceCreated{
-					service: getRemoteService("service-one", "ns1", "existing-gateway", "existing-namespace",
+					service: remoteService("service-one", "ns1", "existing-gateway", "existing-namespace",
 						"111", []corev1.ServicePort{
 							{
 								Name:     "port1",
@@ -354,7 +149,7 @@ func TestRemoteServiceCreated(t *testing.T) {
 				},
 			},
 			expectedLocalServices: []*corev1.Service{
-				getMirroredService("service-one-remote", "ns1", "existing-gateway", "existing-namespace", "111", "",
+				mirroredService("service-one-remote", "ns1", "existing-gateway", "existing-namespace", "111", "",
 					[]corev1.ServicePort{
 						{
 							Name:     "port1",
@@ -369,10 +164,10 @@ func TestRemoteServiceCreated(t *testing.T) {
 					}),
 			},
 			expectedLocalEndpoints: []*corev1.Endpoints{
-				getEndpoints("service-one-remote", "ns1", "existing-gateway", "existing-namespace", "", nil),
+				endpoints("service-one-remote", "ns1", "existing-gateway", "existing-namespace", "", nil),
 			},
 			remoteResources: []string{
-				getGatewayAsYaml("existing-gateway", "existing-namespace", "222", "192.0.2.127", "incoming-port-wrong", 888, t),
+				gatewayAsYaml("existing-gateway", "existing-namespace", "222", "192.0.2.127", "incoming-port-wrong", 888, t),
 			},
 		},
 		{
@@ -380,7 +175,7 @@ func TestRemoteServiceCreated(t *testing.T) {
 			events: []interface{}{
 				&RemoteServiceCreated{
 
-					service: getRemoteService("service-one", "ns1", "existing-gateway", "existing-namespace", "111", []corev1.ServicePort{
+					service: remoteService("service-one", "ns1", "existing-gateway", "existing-namespace", "111", []corev1.ServicePort{
 						{
 							Name:     "port1",
 							Protocol: "TCP",
@@ -399,7 +194,7 @@ func TestRemoteServiceCreated(t *testing.T) {
 				},
 			},
 			expectedLocalServices: []*corev1.Service{
-				getMirroredService(
+				mirroredService(
 					"service-one-remote",
 					"ns1",
 					"existing-gateway",
@@ -420,7 +215,7 @@ func TestRemoteServiceCreated(t *testing.T) {
 					}),
 			},
 			expectedLocalEndpoints: []*corev1.Endpoints{
-				getEndpoints("service-one-remote", "ns1", "existing-gateway", "existing-namespace", "192.0.2.127", []corev1.EndpointPort{
+				endpoints("service-one-remote", "ns1", "existing-gateway", "existing-namespace", "192.0.2.127", []corev1.EndpointPort{
 					{
 						Name:     "port1",
 						Port:     888,
@@ -434,7 +229,7 @@ func TestRemoteServiceCreated(t *testing.T) {
 				}),
 			},
 			remoteResources: []string{
-				getGatewayAsYaml("existing-gateway", "existing-namespace", "222", "192.0.2.127", "incoming-port", 888, t),
+				gatewayAsYaml("existing-gateway", "existing-namespace", "222", "192.0.2.127", "incoming-port", 888, t),
 			},
 		},
 	} {
@@ -455,8 +250,8 @@ func TestRemoteServiceDeleted(t *testing.T) {
 			},
 
 			localResources: []string{
-				getMirroredServiceAsYaml("test-service-remote-to-delete", "test-namespace-to-delete", "", "", "", "", nil, t),
-				getEndpointsAsYaml("test-service-remote-to-delete", "test-namespace-to-delete", "", "", "", nil, t),
+				mirroredServiceAsYaml("test-service-remote-to-delete", "test-namespace-to-delete", "", "", "", "", nil, t),
+				endpointsAsYaml("test-service-remote-to-delete", "test-namespace-to-delete", "", "", "", nil, t),
 			},
 		},
 	} {
@@ -471,7 +266,7 @@ func TestRemoteServiceUpdated(t *testing.T) {
 			testDescription: "update to new gateway",
 			events: []interface{}{
 				&RemoteServiceUpdated{
-					remoteUpdate: getRemoteService("test-service", "test-namespace", "gateway-new", "gateway-ns", "currentServiceResVersion", []corev1.ServicePort{
+					remoteUpdate: remoteService("test-service", "test-namespace", "gateway-new", "gateway-ns", "currentServiceResVersion", []corev1.ServicePort{
 						{
 							Name:     "port1",
 							Protocol: "TCP",
@@ -483,7 +278,7 @@ func TestRemoteServiceUpdated(t *testing.T) {
 							Port:     222,
 						},
 					}),
-					localService: getMirroredService("test-service-remote", "test-namespace", "gateway", "gateway-ns", "pastServiceResVersion", "pastGatewayResVersion", []corev1.ServicePort{
+					localService: mirroredService("test-service-remote", "test-namespace", "gateway", "gateway-ns", "pastServiceResVersion", "pastGatewayResVersion", []corev1.ServicePort{
 						{
 							Name:     "port1",
 							Protocol: "TCP",
@@ -495,7 +290,7 @@ func TestRemoteServiceUpdated(t *testing.T) {
 							Port:     222,
 						},
 					}),
-					localEndpoints: getEndpoints("test-service-remote", "test-namespace", "gateway", "gateway-ns", "192.0.2.127", []corev1.EndpointPort{
+					localEndpoints: endpoints("test-service-remote", "test-namespace", "gateway", "gateway-ns", "192.0.2.127", []corev1.EndpointPort{
 						{
 							Name:     "port1",
 							Port:     888,
@@ -514,10 +309,10 @@ func TestRemoteServiceUpdated(t *testing.T) {
 				},
 			},
 			remoteResources: []string{
-				getGatewayAsYaml("gateway-new", "gateway-ns", "currentGatewayResVersion", "0.0.0.0", "incoming-port", 999, t),
+				gatewayAsYaml("gateway-new", "gateway-ns", "currentGatewayResVersion", "0.0.0.0", "incoming-port", 999, t),
 			},
 			localResources: []string{
-				getMirroredServiceAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "past", "pastGatewayResVersion", []corev1.ServicePort{
+				mirroredServiceAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "past", "pastGatewayResVersion", []corev1.ServicePort{
 					{
 						Name:     "port1",
 						Protocol: "TCP",
@@ -529,7 +324,7 @@ func TestRemoteServiceUpdated(t *testing.T) {
 						Port:     222,
 					},
 				}, t),
-				getEndpointsAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "192.0.2.127", []corev1.EndpointPort{
+				endpointsAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "192.0.2.127", []corev1.EndpointPort{
 					{
 						Name:     "port1",
 						Port:     888,
@@ -543,7 +338,7 @@ func TestRemoteServiceUpdated(t *testing.T) {
 				}, t),
 			},
 			expectedLocalServices: []*corev1.Service{
-				getMirroredService(
+				mirroredService(
 					"test-service-remote",
 					"test-namespace",
 					"gateway-new",
@@ -564,7 +359,7 @@ func TestRemoteServiceUpdated(t *testing.T) {
 					}),
 			},
 			expectedLocalEndpoints: []*corev1.Endpoints{
-				getEndpoints("test-service-remote", "test-namespace", "gateway-new", "gateway-ns", "0.0.0.0", []corev1.EndpointPort{
+				endpoints("test-service-remote", "test-namespace", "gateway-new", "gateway-ns", "0.0.0.0", []corev1.EndpointPort{
 					{
 						Name:     "port1",
 						Port:     999,
@@ -582,7 +377,7 @@ func TestRemoteServiceUpdated(t *testing.T) {
 			testDescription: "updates service ports on both service and endpoints",
 			events: []interface{}{
 				&RemoteServiceUpdated{
-					remoteUpdate: getRemoteService("test-service", "test-namespace", "gateway", "gateway-ns", "currentServiceResVersion", []corev1.ServicePort{
+					remoteUpdate: remoteService("test-service", "test-namespace", "gateway", "gateway-ns", "currentServiceResVersion", []corev1.ServicePort{
 						{
 							Name:     "port1",
 							Protocol: "TCP",
@@ -594,7 +389,7 @@ func TestRemoteServiceUpdated(t *testing.T) {
 							Port:     333,
 						},
 					}),
-					localService: getMirroredService("test-service-remote", "test-namespace", "gateway", "gateway-ns", "pastServiceResVersion", "pastGatewayResVersion", []corev1.ServicePort{
+					localService: mirroredService("test-service-remote", "test-namespace", "gateway", "gateway-ns", "pastServiceResVersion", "pastGatewayResVersion", []corev1.ServicePort{
 						{
 							Name:     "port1",
 							Protocol: "TCP",
@@ -606,7 +401,7 @@ func TestRemoteServiceUpdated(t *testing.T) {
 							Port:     222,
 						},
 					}),
-					localEndpoints: getEndpoints("test-service-remote", "test-namespace", "gateway", "gateway-ns", "192.0.2.127", []corev1.EndpointPort{
+					localEndpoints: endpoints("test-service-remote", "test-namespace", "gateway", "gateway-ns", "192.0.2.127", []corev1.EndpointPort{
 						{
 							Name:     "port1",
 							Port:     888,
@@ -625,10 +420,10 @@ func TestRemoteServiceUpdated(t *testing.T) {
 				},
 			},
 			remoteResources: []string{
-				getGatewayAsYaml("gateway", "gateway-ns", "currentGatewayResVersion", "192.0.2.127", "incoming-port", 888, t),
+				gatewayAsYaml("gateway", "gateway-ns", "currentGatewayResVersion", "192.0.2.127", "incoming-port", 888, t),
 			},
 			localResources: []string{
-				getMirroredServiceAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "past", "pastGatewayResVersion", []corev1.ServicePort{
+				mirroredServiceAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "past", "pastGatewayResVersion", []corev1.ServicePort{
 					{
 						Name:     "port1",
 						Protocol: "TCP",
@@ -645,7 +440,7 @@ func TestRemoteServiceUpdated(t *testing.T) {
 						Port:     333,
 					},
 				}, t),
-				getEndpointsAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "192.0.2.127", []corev1.EndpointPort{
+				endpointsAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "192.0.2.127", []corev1.EndpointPort{
 					{
 						Name:     "port1",
 						Port:     888,
@@ -664,7 +459,7 @@ func TestRemoteServiceUpdated(t *testing.T) {
 				}, t),
 			},
 			expectedLocalServices: []*corev1.Service{
-				getMirroredService("test-service-remote", "test-namespace", "gateway", "gateway-ns", "currentServiceResVersion", "currentGatewayResVersion",
+				mirroredService("test-service-remote", "test-namespace", "gateway", "gateway-ns", "currentServiceResVersion", "currentGatewayResVersion",
 					[]corev1.ServicePort{
 						{
 							Name:     "port1",
@@ -680,7 +475,7 @@ func TestRemoteServiceUpdated(t *testing.T) {
 			},
 
 			expectedLocalEndpoints: []*corev1.Endpoints{
-				getEndpoints("test-service-remote", "test-namespace", "gateway", "gateway-ns", "192.0.2.127", []corev1.EndpointPort{
+				endpoints("test-service-remote", "test-namespace", "gateway", "gateway-ns", "192.0.2.127", []corev1.EndpointPort{
 					{
 						Name:     "port1",
 						Port:     888,
@@ -714,7 +509,7 @@ func TestRemoteGatewayUpdated(t *testing.T) {
 					},
 					newResourceVersion: "currentGatewayResVersion",
 					affectedServices: []*corev1.Service{
-						getMirroredService("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion",
+						mirroredService("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion",
 							[]corev1.ServicePort{
 								{
 									Name:     "svc-1-port",
@@ -723,7 +518,7 @@ func TestRemoteGatewayUpdated(t *testing.T) {
 								},
 							}),
 
-						getMirroredService("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion", []corev1.ServicePort{
+						mirroredService("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion", []corev1.ServicePort{
 							{
 								Name:     "svc-2-port",
 								Protocol: "TCP",
@@ -735,7 +530,7 @@ func TestRemoteGatewayUpdated(t *testing.T) {
 			},
 
 			expectedLocalServices: []*corev1.Service{
-				getMirroredService("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "currentGatewayResVersion",
+				mirroredService("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "currentGatewayResVersion",
 					[]corev1.ServicePort{
 						{
 							Name:     "svc-1-port",
@@ -744,7 +539,7 @@ func TestRemoteGatewayUpdated(t *testing.T) {
 						},
 					}),
 
-				getMirroredService("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "", "currentGatewayResVersion", []corev1.ServicePort{
+				mirroredService("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "", "currentGatewayResVersion", []corev1.ServicePort{
 					{
 						Name:     "svc-2-port",
 						Protocol: "TCP",
@@ -753,14 +548,14 @@ func TestRemoteGatewayUpdated(t *testing.T) {
 				}),
 			},
 			expectedLocalEndpoints: []*corev1.Endpoints{
-				getEndpoints("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0",
+				endpoints("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0",
 					[]corev1.EndpointPort{
 						{
 							Name:     "svc-1-port",
 							Port:     999,
 							Protocol: "TCP",
 						}}),
-				getEndpoints("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0",
+				endpoints("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0",
 					[]corev1.EndpointPort{
 						{
 							Name:     "svc-2-port",
@@ -769,7 +564,7 @@ func TestRemoteGatewayUpdated(t *testing.T) {
 						}}),
 			},
 			localResources: []string{
-				getMirroredServiceAsYaml("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion",
+				mirroredServiceAsYaml("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion",
 					[]corev1.ServicePort{
 						{
 							Name:     "svc-1-port",
@@ -777,21 +572,21 @@ func TestRemoteGatewayUpdated(t *testing.T) {
 							Port:     8081,
 						},
 					}, t),
-				getEndpointsAsYaml("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0",
+				endpointsAsYaml("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0",
 					[]corev1.EndpointPort{
 						{
 							Name:     "svc-1-port",
 							Port:     888,
 							Protocol: "TCP",
 						}}, t),
-				getMirroredServiceAsYaml("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion", []corev1.ServicePort{
+				mirroredServiceAsYaml("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion", []corev1.ServicePort{
 					{
 						Name:     "svc-2-port",
 						Protocol: "TCP",
 						Port:     8082,
 					},
 				}, t),
-				getEndpointsAsYaml("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0",
+				endpointsAsYaml("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0",
 					[]corev1.EndpointPort{
 						{
 							Name:     "svc-2-port",
@@ -813,7 +608,7 @@ func TestRemoteGatewayUpdated(t *testing.T) {
 					},
 					newResourceVersion: "currentGatewayResVersion",
 					affectedServices: []*corev1.Service{
-						getMirroredService("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion",
+						mirroredService("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion",
 							[]corev1.ServicePort{
 								{
 									Name:     "svc-1-port",
@@ -821,7 +616,7 @@ func TestRemoteGatewayUpdated(t *testing.T) {
 									Port:     8081,
 								},
 							}),
-						getMirroredService("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion", []corev1.ServicePort{
+						mirroredService("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion", []corev1.ServicePort{
 							{
 								Name:     "svc-2-port",
 								Protocol: "TCP",
@@ -832,7 +627,7 @@ func TestRemoteGatewayUpdated(t *testing.T) {
 				},
 			},
 			expectedLocalServices: []*corev1.Service{
-				getMirroredService("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "currentGatewayResVersion",
+				mirroredService("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "currentGatewayResVersion",
 					[]corev1.ServicePort{
 						{
 							Name:     "svc-1-port",
@@ -840,7 +635,7 @@ func TestRemoteGatewayUpdated(t *testing.T) {
 							Port:     8081,
 						},
 					}),
-				getMirroredService("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "", "currentGatewayResVersion", []corev1.ServicePort{
+				mirroredService("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "", "currentGatewayResVersion", []corev1.ServicePort{
 					{
 						Name:     "svc-2-port",
 						Protocol: "TCP",
@@ -849,14 +644,14 @@ func TestRemoteGatewayUpdated(t *testing.T) {
 				}),
 			},
 			expectedLocalEndpoints: []*corev1.Endpoints{
-				getEndpoints("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.1",
+				endpoints("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.1",
 					[]corev1.EndpointPort{
 						{
 							Name:     "svc-1-port",
 							Port:     888,
 							Protocol: "TCP",
 						}}),
-				getEndpoints("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.1",
+				endpoints("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.1",
 					[]corev1.EndpointPort{
 						{
 							Name:     "svc-2-port",
@@ -866,7 +661,7 @@ func TestRemoteGatewayUpdated(t *testing.T) {
 			},
 
 			localResources: []string{
-				getMirroredServiceAsYaml("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion",
+				mirroredServiceAsYaml("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion",
 					[]corev1.ServicePort{
 						{
 							Name:     "svc-1-port",
@@ -874,21 +669,21 @@ func TestRemoteGatewayUpdated(t *testing.T) {
 							Port:     8081,
 						},
 					}, t),
-				getEndpointsAsYaml("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0",
+				endpointsAsYaml("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0",
 					[]corev1.EndpointPort{
 						{
 							Name:     "svc-1-port",
 							Port:     888,
 							Protocol: "TCP",
 						}}, t),
-				getMirroredServiceAsYaml("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion", []corev1.ServicePort{
+				mirroredServiceAsYaml("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion", []corev1.ServicePort{
 					{
 						Name:     "svc-2-port",
 						Protocol: "TCP",
 						Port:     8082,
 					},
 				}, t),
-				getEndpointsAsYaml("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0",
+				endpointsAsYaml("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0",
 					[]corev1.EndpointPort{
 						{
 							Name:     "svc-2-port",
@@ -905,7 +700,7 @@ func TestRemoteGatewayUpdated(t *testing.T) {
 func TestRemoteGatewayDeleted(t *testing.T) {
 	for _, tt := range []testCase{
 		{
-			testDescription: "removes endpoint subests when gateway is deleted",
+			testDescription: "removes endpoint subsets when gateway is deleted",
 			events: []interface{}{
 				&RemoteGatewayDeleted{
 					gatewayData: &gatewayMetadata{
@@ -915,7 +710,7 @@ func TestRemoteGatewayDeleted(t *testing.T) {
 				},
 			},
 			expectedLocalServices: []*corev1.Service{
-				getMirroredService("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion",
+				mirroredService("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion",
 					[]corev1.ServicePort{
 						{
 							Name:     "svc-1-port",
@@ -924,7 +719,7 @@ func TestRemoteGatewayDeleted(t *testing.T) {
 						},
 					}),
 
-				getMirroredService("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion", []corev1.ServicePort{
+				mirroredService("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion", []corev1.ServicePort{
 					{
 						Name:     "svc-2-port",
 						Protocol: "TCP",
@@ -933,11 +728,11 @@ func TestRemoteGatewayDeleted(t *testing.T) {
 				}),
 			},
 			expectedLocalEndpoints: []*corev1.Endpoints{
-				getEndpoints("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", nil),
-				getEndpoints("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "", nil),
+				endpoints("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", nil),
+				endpoints("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "", nil),
 			},
 			localResources: []string{
-				getMirroredServiceAsYaml("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion",
+				mirroredServiceAsYaml("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion",
 					[]corev1.ServicePort{
 						{
 							Name:     "svc-1-port",
@@ -945,21 +740,21 @@ func TestRemoteGatewayDeleted(t *testing.T) {
 							Port:     8081,
 						},
 					}, t),
-				getEndpointsAsYaml("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0",
+				endpointsAsYaml("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0",
 					[]corev1.EndpointPort{
 						{
 							Name:     "svc-1-port",
 							Port:     888,
 							Protocol: "TCP",
 						}}, t),
-				getMirroredServiceAsYaml("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion", []corev1.ServicePort{
+				mirroredServiceAsYaml("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "", "pastGatewayResVersion", []corev1.ServicePort{
 					{
 						Name:     "svc-2-port",
 						Protocol: "TCP",
 						Port:     8082,
 					},
 				}, t),
-				getEndpointsAsYaml("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0",
+				endpointsAsYaml("test-service-2-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0",
 					[]corev1.EndpointPort{
 						{
 							Name:     "svc-2-port",
@@ -982,10 +777,10 @@ func TestClusterUnregistered(t *testing.T) {
 				&ClusterUnregistered{},
 			},
 			localResources: []string{
-				getMirroredServiceAsYaml("test-service-1-remote", "test-namespace", "", "", "", "", nil, t),
-				getEndpointsAsYaml("test-service-1-remote", "test-namespace", "", "", "", nil, t),
-				getMirroredServiceAsYaml("test-service-2-remote", "test-namespace", "", "", "", "", nil, t),
-				getEndpointsAsYaml("test-service-2-remote", "test-namespace", "", "", "", nil, t),
+				mirroredServiceAsYaml("test-service-1-remote", "test-namespace", "", "", "", "", nil, t),
+				endpointsAsYaml("test-service-1-remote", "test-namespace", "", "", "", nil, t),
+				mirroredServiceAsYaml("test-service-2-remote", "test-namespace", "", "", "", "", nil, t),
+				endpointsAsYaml("test-service-2-remote", "test-namespace", "", "", "", nil, t),
 			},
 		},
 	} {
@@ -1002,21 +797,21 @@ func TestGcOrphanedServices(t *testing.T) {
 				&OprhanedServicesGcTriggered{},
 			},
 			localResources: []string{
-				getMirroredServiceAsYaml("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "", nil, t),
-				getEndpointsAsYaml("test-service-1-remote", "test-namespace", "", "", "", nil, t),
-				getMirroredServiceAsYaml("test-service-2-remote", "test-namespace", "", "", "", "", nil, t),
-				getEndpointsAsYaml("test-service-2-remote", "test-namespace", "", "", "", nil, t),
+				mirroredServiceAsYaml("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "", nil, t),
+				endpointsAsYaml("test-service-1-remote", "test-namespace", "", "", "", nil, t),
+				mirroredServiceAsYaml("test-service-2-remote", "test-namespace", "", "", "", "", nil, t),
+				endpointsAsYaml("test-service-2-remote", "test-namespace", "", "", "", nil, t),
 			},
 			remoteResources: []string{
-				getRemoteServiceAsYaml("test-service-1", "test-namespace", "gateway", "gateway-ns", "", nil, t),
+				remoteServiceAsYaml("test-service-1", "test-namespace", "gateway", "gateway-ns", "", nil, t),
 			},
 
 			expectedLocalServices: []*corev1.Service{
-				getMirroredService("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "", nil),
+				mirroredService("test-service-1-remote", "test-namespace", "gateway", "gateway-ns", "", "", nil),
 			},
 
 			expectedLocalEndpoints: []*corev1.Endpoints{
-				getEndpoints("test-service-1-remote", "test-namespace", "", "", "", nil),
+				endpoints("test-service-1-remote", "test-namespace", "", "", "", nil),
 			},
 		},
 	} {
@@ -1046,10 +841,10 @@ func onAddOrUpdateTestCases(t *testing.T, isAdd bool) []testCase {
 		{
 			testDescription: fmt.Sprintf("enqueue a RemoteServiceCreated event when this is not a gateway and we have the needed annotations (%s)", testType),
 			events: []interface{}{
-				onAddOrUpdateEvent(isAdd, getRemoteService("test-service", "test-namespace", "gateway", "gateway-ns", "resVersion", nil)),
+				onAddOrUpdateEvent(isAdd, remoteService("test-service", "test-namespace", "gateway", "gateway-ns", "resVersion", nil)),
 			},
 			expectedEventsInQueue: []interface{}{&RemoteServiceCreated{
-				service: getRemoteService("test-service", "test-namespace", "gateway", "gateway-ns", "resVersion", nil),
+				service: remoteService("test-service", "test-namespace", "gateway", "gateway-ns", "resVersion", nil),
 				gatewayData: &gatewayMetadata{
 					Name:      "gateway",
 					Namespace: "gateway-ns",
@@ -1059,25 +854,25 @@ func onAddOrUpdateTestCases(t *testing.T, isAdd bool) []testCase {
 		{
 			testDescription: fmt.Sprintf("enqueue a ConsiderGatewayUpdateDispatch event if this is clearly not a mirrorable service (%s)", testType),
 			events: []interface{}{
-				onAddOrUpdateEvent(isAdd, getRemoteService("test-service", "test-namespace", "", "", "resVersion", nil)),
+				onAddOrUpdateEvent(isAdd, remoteService("test-service", "test-namespace", "", "", "resVersion", nil)),
 			},
 			expectedEventsInQueue: []interface{}{&ConsiderGatewayUpdateDispatch{
-				maybeGateway: getRemoteService("test-service", "test-namespace", "", "", "resVersion", nil),
+				maybeGateway: remoteService("test-service", "test-namespace", "", "", "resVersion", nil),
 			}},
 		},
 		{
 			testDescription: fmt.Sprintf("enqueue a RemoteServiceUpdated event if this is a service that we have already mirrored and its res version is different (%s)", testType),
 			events: []interface{}{
-				onAddOrUpdateEvent(isAdd, getRemoteService("test-service", "test-namespace", "gateway", "gateway-ns", "currentResVersion", nil)),
+				onAddOrUpdateEvent(isAdd, remoteService("test-service", "test-namespace", "gateway", "gateway-ns", "currentResVersion", nil)),
 			},
 			localResources: []string{
-				getMirroredServiceAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "pastResourceVersion", "gatewayResVersion", nil, t),
-				getEndpointsAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0", nil, t),
+				mirroredServiceAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "pastResourceVersion", "gatewayResVersion", nil, t),
+				endpointsAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0", nil, t),
 			},
 			expectedEventsInQueue: []interface{}{&RemoteServiceUpdated{
-				localService:   getMirroredService("test-service-remote", "test-namespace", "gateway", "gateway-ns", "pastResourceVersion", "gatewayResVersion", nil),
-				localEndpoints: getEndpoints("test-service-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0", nil),
-				remoteUpdate:   getRemoteService("test-service", "test-namespace", "gateway", "gateway-ns", "currentResVersion", nil),
+				localService:   mirroredService("test-service-remote", "test-namespace", "gateway", "gateway-ns", "pastResourceVersion", "gatewayResVersion", nil),
+				localEndpoints: endpoints("test-service-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0", nil),
+				remoteUpdate:   remoteService("test-service", "test-namespace", "gateway", "gateway-ns", "currentResVersion", nil),
 				gatewayData: &gatewayMetadata{
 					Name:      "gateway",
 					Namespace: "gateway-ns",
@@ -1087,21 +882,21 @@ func onAddOrUpdateTestCases(t *testing.T, isAdd bool) []testCase {
 		{
 			testDescription: fmt.Sprintf("not not enqueue any events as this update does not really tell us anything new (res version is the same...) (%s)", testType),
 			events: []interface{}{
-				onAddOrUpdateEvent(isAdd, getRemoteService("test-service", "test-namespace", "gateway", "gateway-ns", "currentResVersion", nil)),
+				onAddOrUpdateEvent(isAdd, remoteService("test-service", "test-namespace", "gateway", "gateway-ns", "currentResVersion", nil)),
 			},
 			localResources: []string{
-				getMirroredServiceAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "currentResVersion", "gatewayResVersion", nil, t),
-				getEndpointsAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0", nil, t),
+				mirroredServiceAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "currentResVersion", "gatewayResVersion", nil, t),
+				endpointsAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0", nil, t),
 			},
 		},
 		{
 			testDescription: fmt.Sprintf("enqueue RemoteServiceDeleted event as this service is not mirrorable anymore (%s)", testType),
 			events: []interface{}{
-				onAddOrUpdateEvent(isAdd, getRemoteService("test-service", "test-namespace", "", "gateway-ns", "currentResVersion", nil)),
+				onAddOrUpdateEvent(isAdd, remoteService("test-service", "test-namespace", "", "gateway-ns", "currentResVersion", nil)),
 			},
 			localResources: []string{
-				getMirroredServiceAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "currentResVersion", "gatewayResVersion", nil, t),
-				getEndpointsAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0", nil, t),
+				mirroredServiceAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "currentResVersion", "gatewayResVersion", nil, t),
+				endpointsAsYaml("test-service-remote", "test-namespace", "gateway", "gateway-ns", "0.0.0.0", nil, t),
 			},
 			expectedEventsInQueue: []interface{}{&RemoteServiceDeleted{
 				Name:      "test-service",
@@ -1131,7 +926,7 @@ func TestOnDelete(t *testing.T) {
 			testDescription: "enqueues a RemoteServiceDeleted because there is gateway metadata present on the service",
 			events: []interface{}{
 				&OnDeleteCalled{
-					svc: getRemoteService("test-service", "test-namespace", "gateway", "gateway-ns", "currentResVersion", nil),
+					svc: remoteService("test-service", "test-namespace", "gateway", "gateway-ns", "currentResVersion", nil),
 				},
 			},
 
@@ -1146,7 +941,7 @@ func TestOnDelete(t *testing.T) {
 			testDescription: "enqueues a RemoteGatewayDeleted because there is no gateway metadata present on the service",
 			events: []interface{}{
 				&OnDeleteCalled{
-					svc: getRemoteService("gateway", "test-namespace", "", "", "currentResVersion", nil),
+					svc: remoteService("gateway", "test-namespace", "", "", "currentResVersion", nil),
 				},
 			},
 			expectedEventsInQueue: []interface{}{
